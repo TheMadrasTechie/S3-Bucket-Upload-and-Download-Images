@@ -1,91 +1,63 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse, Response
-import boto3
-from botocore.exceptions import NoCredentialsError
-import shutil
-import os
-import json
-
+from fastapi import FastAPI, File, UploadFile, HTTPException, Response
+from S3_process import upload_file_to_s3, get_image_from_s3
+from pdf_3_process import save_pdf_with_unique_name, retrieve_pdf_content
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response
+from io import BytesIO
+from pdf_3_process import save_pdf_with_unique_name, retrieve_pdf_content
 app = FastAPI()
-s3_client = boto3.client('s3', region_name='ap-south-1')
-bucket_name = 'YOUR_S3_BUCKET'
-
-def delete_local_file(filename):
-    try:
-        os.remove(filename)
-        print(f"The file {filename} has been deleted.")
-    except FileNotFoundError:
-        print(f"The file {filename} does not exist.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-async def upload_to_aws(file, bucket, s3_file):
-    try:
-        with open(file.filename, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        s3_client.upload_file(file.filename, bucket, s3_file)
-        return True
-    except FileNotFoundError:
-        return False
-    except NoCredentialsError:
-        return False
 
 @app.post("/upload/")
-async def upload_file(file: UploadFile = File(...)):
-    upload_success = await upload_to_aws(file, bucket_name, file.filename)
-    if upload_success:
-        delete_local_file(file.filename)
-        return JSONResponse(status_code=200, content={"message": "File uploaded successfully"})
-    else:
-        return JSONResponse(status_code=500, content={"message": "Failed to upload file"})
-
-@app.get("/image/{image_name}")
-async def get_image(image_name: str):
+async def upload_image(file: UploadFile = File(...)):
     try:
-        # Get the S3 object
-        file = s3_client.get_object(Bucket=bucket_name, Key=image_name)
+        # Read file contents
+        file_bytes = await file.read()
         
-        # Stream the file directly from S3
-        return StreamingResponse(file['Body'], media_type='image/jpeg')
-    
-    except s3_client.exceptions.NoSuchKey:
-        raise HTTPException(status_code=404, detail="Image not found")
-    except NoCredentialsError:
-        raise HTTPException(status_code=401, detail="Credentials not available")
+        # Get file extension
+        file_extension = file.filename.split(".")[-1]
+        
+        # Upload file to S3
+        unique_image_name = upload_file_to_s3(file_bytes, file_extension)
+        
+        return {"message": "Image uploaded successfully", "image_id": unique_image_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
 
-@app.post("/upload-json/")
-async def upload_json(request: Request):
-    json_data = await request.json()
-    json_filename = f"{json_data['name']}.json"  # You can use a unique identifier
-
+@app.get("/image/{image_id}/")
+async def get_image(image_id: str):
     try:
-        s3_client.put_object(Bucket=bucket_name, Key=json_filename, Body=json.dumps(json_data))
-        return JSONResponse(status_code=200, content={"message": "JSON uploaded successfully"})
-    except NoCredentialsError:
-        return JSONResponse(status_code=500, content={"message": "Failed to upload JSON"})
+        # Retrieve image data from S3
+        image_data = get_image_from_s3(image_id)
+        
+        # Create a response with image content
+        response = Response(content=image_data, media_type="image/png")
+        return response
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve image: {str(e)}")
 
-@app.post("/upload-json-file/")
-async def upload_json_file(file: UploadFile = File(...)):
-    if file.content_type != 'application/json':
-        return JSONResponse(status_code=400, content={"message": "Invalid file type"})
 
-    json_content = await file.read()
-    json_filename = file.filename
-
+@app.post("/upload_pdf/")
+async def upload_pdf(file: UploadFile = File(...)):
     try:
-        s3_client.put_object(Bucket=bucket_name, Key=json_filename, Body=json_content)
-        return JSONResponse(status_code=200, content={"message": "JSON file uploaded successfully"})
-    except NoCredentialsError:
-        return JSONResponse(status_code=500, content={"message": "Failed to upload JSON file"})
+        # Read the file content directly
+        file_content = await file.read()
 
-@app.get("/json/{json_name}")
-async def get_json(json_name: str):
+        # Save the PDF to S3 with a unique name
+        unique_name = save_pdf_with_unique_name(file_content, file.filename)
+        
+        return {"status": "success", "unique_name": unique_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/retrieve_pdf/{pdf_name}")
+async def get_pdf(pdf_name: str):
     try:
-        file = s3_client.get_object(Bucket=bucket_name, Key=f"{json_name}.json")
-        json_data = file['Body'].read().decode('utf-8')
-        return Response(content=json_data, media_type="application/json")
-    except s3_client.exceptions.NoSuchKey:
-        raise HTTPException(status_code=404, detail="JSON not found")
-    except NoCredentialsError:
-        raise HTTPException(status_code=401, detail="Credentials not available")
+        pdf_content = retrieve_pdf_content(pdf_name)
+        return Response(content=pdf_content, media_type="application/pdf")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
